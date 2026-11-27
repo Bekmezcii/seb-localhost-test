@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Yardımcı kabul testi (Faz 1 · Adım 1.7)</title>
+<style>
+  :root { --bg:#f6f7f9; --fg:#14171c; --muted:#5b6470; --ok:#1f8a4c; --bad:#c0392b; --warn:#a86500; --card:#fff; --line:#dde1e6; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14171c; --fg:#eef0f3; --muted:#a3abb6; --ok:#4cc386; --bad:#f07a6d; --warn:#f0b35a; --card:#1d2128; --line:#2c323b; } }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width:780px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  p.muted { color:var(--muted); margin:0 0 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin:10px 0; }
+  .row { display:flex; justify-content:space-between; gap:12px; align-items:baseline; flex-wrap:wrap; }
+  .overall { font-size:24px; font-weight:800; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); } .wait { color:var(--muted); } .warn { color:var(--warn); }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  td { padding:6px 4px; border-bottom:1px solid var(--line); vertical-align:top; }
+  td:first-child { width:34px; font-weight:800; }
+  td.detail { color:var(--muted); word-break:break-all; }
+  code, pre { font:13px/1.4 ui-monospace, Consolas, monospace; word-break:break-all; white-space:pre-wrap; }
+  button { font:inherit; padding:8px 14px; border-radius:8px; border:1px solid var(--line); background:var(--card); color:var(--fg); cursor:pointer; margin-right:8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Yardımcı kabul testi</h1>
+  <p class="muted">Bu sayfa, bu bilgisayardaki AITutor Device Helper'a (<code>http://127.0.0.1:47321</code>) bağlanır,
+    bilgisayar bilgisini okur, bir challenge imzalatır ve imzayı tarayıcıda doğrular. Hiçbir veri başka yere gönderilmez.</p>
+
+  <div class="card">
+    <div class="row"><span>Ortam</span><strong id="env"></strong></div>
+    <div class="row"><span>Sayfa adresi</span><code id="origin"></code></div>
+    <div class="row"><span>Sonuç</span><span id="overall" class="overall wait">deneniyor…</span></div>
+  </div>
+
+  <div class="card"><table id="checks"></table></div>
+
+  <p>
+    <button id="rerun">Tekrar dene</button>
+    <button id="copy">Sonuçları kopyala</button>
+  </p>
+  <div class="card"><pre id="ua"></pre></div>
+</main>
+<script>
+const HELPER = "http://127.0.0.1:47321";
+const PREFIX = "aitutor-device-proof/v1\n";
+const isSeb = /SEB\//.test(navigator.userAgent);
+document.getElementById("env").textContent = isSeb ? "Safe Exam Browser" : "Normal tarayıcı";
+document.getElementById("origin").textContent = location.origin;
+document.getElementById("ua").textContent = "User-Agent: " + navigator.userAgent;
+
+let summary = [];
+
+// --- yardımcılar ---
+const enc = new TextEncoder();
+const b64urlFromBytes = (bytes) =>
+  btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const bytesFromB64 = (s) => {
+  s = s.replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  return Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+};
+const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+const random = (n) => crypto.getRandomValues(new Uint8Array(n));
+
+async function call(path, options) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 5000);
+  const started = performance.now();
+  try {
+    const res = await fetch(HELPER + path, { ...options, signal: ctrl.signal, cache: "no-store" });
+    const text = await res.text();
+    let json = null; try { json = JSON.parse(text); } catch {}
+    return { status: res.status, ms: Math.round(performance.now() - started), text, json };
+  } catch (e) {
+    return { status: 0, ms: Math.round(performance.now() - started), text: e.name === "AbortError" ? "Zaman aşımı (5 sn)" : String(e), json: null };
+  } finally { clearTimeout(timer); }
+}
+
+// Sunucunun üreteceği biçimde sahte challenge: base64url(payload).base64url(32 bayt)
+function makeChallenge() {
+  const payload = { v: 1, purpose: "acceptance-test", iat: Math.floor(Date.now() / 1000), nonce: b64urlFromBytes(random(16)) };
+  return b64urlFromBytes(enc.encode(JSON.stringify(payload))) + "." + b64urlFromBytes(random(32));
+}
+
+function addCheck(pass, title, detail) {
+  const row = document.createElement("tr");
+  const mark = pass === null ? "–" : pass ? "✔" : "✘";
+  const cls = pass === null ? "warn" : pass ? "ok" : "bad";
+  row.innerHTML = `<td class="${cls}">${mark}</td><td><b></b><div class="detail"></div></td>`;
+  row.querySelector("b").textContent = title;
+  row.querySelector(".detail").textContent = detail;
+  document.getElementById("checks").appendChild(row);
+  summary.push(`${mark} ${title}: ${detail}`);
+  return pass !== false;
+}
+
+async function run() {
+  document.getElementById("checks").innerHTML = "";
+  const overall = document.getElementById("overall");
+  overall.textContent = "deneniyor…"; overall.className = "overall wait";
+  summary = [`Ortam: ${isSeb ? "SEB" : "Tarayıcı"} | Sayfa: ${location.origin} | ${new Date().toISOString()}`];
+  let allOk = true;
+
+  // 1. /v1/info
+  const info = await call("/v1/info", { method: "GET" });
+  const i = info.json;
+  if (!addCheck(info.status === 200 && i, "1. Bilgi (/v1/info)",
+      info.status === 200 && i ? `${info.ms} ms` : `durum ${info.status || "bağlanamadı"}: ${info.text}`)) {
+    allOk = false;
+    addCheck(false, "Sonraki adımlar atlandı", "Yardımcıya ulaşılamadı. Servis çalışıyor mu, izin verilen köken bu sayfa mı?");
+    return finish(allOk);
+  }
+  addCheck(true, "   Bilgisayar", `${i.device_name} · Windows ${i.os?.version ?? "?"} · yardımcı ${i.helper_version}`);
+  allOk &= addCheck(i.key_type === "tpm", "   Anahtar türü",
+    i.key_type === "tpm" ? "TPM (dışarı aktarılamaz)" : `${i.key_type} (düşük güvenli)`);
+  addCheck(i.tpm?.present ?? null, "   TPM",
+    i.tpm?.present ? `var · ${i.tpm.spec_version ?? "?"} · ${i.tpm.manufacturer ?? "?"}` : "bulunamadı");
+
+  // 2. key_id = SHA-256(SPKI)
+  let spki;
+  try {
+    spki = bytesFromB64(i.public_key_spki);
+    const digest = hex(await crypto.subtle.digest("SHA-256", spki));
+    allOk &= addCheck(digest === i.key_id, "2. key_id = SHA-256(açık anahtar)", `${i.key_id.slice(0, 16)}… ${digest === i.key_id ? "eşleşiyor" : "EŞLEŞMİYOR: " + digest}`);
+  } catch (e) {
+    allOk = false; addCheck(false, "2. key_id kontrolü", String(e));
+  }
+
+  // 3. /v1/sign + doğrulama
+  const challenge = makeChallenge();
+  const sign = await call("/v1/sign", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ challenge }) });
+  if (!addCheck(sign.status === 200 && sign.json, "3. İmza (/v1/sign)",
+      sign.status === 200 ? `${sign.ms} ms` : `durum ${sign.status || "bağlanamadı"}: ${sign.text}`)) {
+    allOk = false; return finish(allOk);
+  }
+  try {
+    const sig = bytesFromB64(sign.json.signature);
+    const key = await crypto.subtle.importKey("spki", spki, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+    const good = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, sig, enc.encode(PREFIX + challenge));
+    const bare = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, sig, enc.encode(challenge));
+    allOk &= addCheck(sig.length === 64 && good, "   İmza doğrulandı (WebCrypto)", `${sig.length} bayt, önekli veriyle ${good ? "geçerli" : "GEÇERSİZ"}`);
+    allOk &= addCheck(!bare, "   Önek zorunlu", bare ? "önceksiz veriyle de geçerli (HATA)" : "önceksiz veriyle geçersiz");
+    allOk &= addCheck(sign.json.key_id === i.key_id, "   İmzadaki key_id", sign.json.key_id === i.key_id ? "bilgi ile aynı" : "FARKLI");
+  } catch (e) {
+    allOk = false; addCheck(false, "   İmza doğrulama", String(e));
+  }
+
+  // 4. Biçimsiz challenge reddedilmeli
+  const badSign = await call("/v1/sign", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ challenge: "rastgele veri imzalat" }) });
+  allOk &= addCheck(badSign.status === 400, "4. Biçimsiz challenge reddedildi", `durum ${badSign.status}`);
+
+  finish(allOk);
+}
+
+function finish(allOk) {
+  const overall = document.getElementById("overall");
+  overall.textContent = allOk ? "BAŞARILI" : "BAŞARISIZ";
+  overall.className = "overall " + (allOk ? "ok" : "bad");
+  summary.splice(1, 0, `SONUÇ: ${allOk ? "BAŞARILI" : "BAŞARISIZ"}`);
+}
+
+document.getElementById("rerun").onclick = run;
+document.getElementById("copy").onclick = async () => {
+  const text = summary.join("\n") + "\n" + navigator.userAgent;
+  try { await navigator.clipboard.writeText(text); alert("Kopyalandı"); }
+  catch { prompt("Kopyalayın:", text); }
+};
+run();
+</script>
+</body>
+</html>
