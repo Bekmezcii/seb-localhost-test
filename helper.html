@@ -137,6 +137,8 @@ async function run() {
     i.key_type === "tpm" ? "TPM (dışarı aktarılamaz)" : `${i.key_type} (düşük güvenli)`);
   addCheck(i.tpm?.present ?? null, "   TPM",
     i.tpm?.present ? `var · ${i.tpm.spec_version ?? "?"} · ${i.tpm.manufacturer ?? "?"}` : "bulunamadı");
+  addCheck(i.seb ? i.seb.installed : null, "   SEB",
+    !i.seb ? "yardımcı SEB bilgisi vermiyor (0.1.2'den eski)" : i.seb.installed ? `kurulu · ${i.seb.version ?? "sürüm bilinmiyor"}` : "kurulu değil");
 
   // 2. key_id = SHA-256(SPKI)
   let spki;
