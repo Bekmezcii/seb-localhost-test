@@ -27,11 +27,13 @@
 <main>
   <h1>Yardımcı kabul testi</h1>
   <p class="muted">Bu sayfa, bu bilgisayardaki AITutor Device Helper'a (<code>http://127.0.0.1:47321</code>) bağlanır,
-    bilgisayar bilgisini okur, bir challenge imzalatır ve imzayı tarayıcıda doğrular. Hiçbir veri başka yere gönderilmez.</p>
+    bilgisayar bilgisini okur, bir challenge imzalatır ve imzayı tarayıcıda doğrular; yanlış Host ve biçimsiz isteklerin reddedildiğine de bakar.
+    Sayfa izin verilen adres dışından açılırsa (ör. dosya olarak) <b>ret beklenen</b> modda çalışır. Hiçbir veri başka yere gönderilmez.</p>
 
   <div class="card">
     <div class="row"><span>Ortam</span><strong id="env"></strong></div>
     <div class="row"><span>Sayfa adresi</span><code id="origin"></code></div>
+    <div class="row"><span>Mod</span><strong id="mode"></strong></div>
     <div class="row"><span>Sonuç</span><span id="overall" class="overall wait">deneniyor…</span></div>
   </div>
 
@@ -45,10 +47,13 @@
 </main>
 <script>
 const HELPER = "http://127.0.0.1:47321";
+const ALLOWED_ORIGIN = "https://bekmezcii.github.io";   // MSI'a AITUTOR_ORIGIN ile verilen adres
+const foreign = location.origin !== ALLOWED_ORIGIN;     // başka adresten açıldıysa ret beklenir
 const PREFIX = "aitutor-device-proof/v1\n";
 const isSeb = /SEB\//.test(navigator.userAgent);
 document.getElementById("env").textContent = isSeb ? "Safe Exam Browser" : "Normal tarayıcı";
 document.getElementById("origin").textContent = location.origin;
+document.getElementById("mode").textContent = foreign ? "Ret bekleniyor (izin verilmeyen adres)" : "Normal (izin verilen adres)";
 document.getElementById("ua").textContent = "User-Agent: " + navigator.userAgent;
 
 let summary = [];
@@ -65,12 +70,12 @@ const bytesFromB64 = (s) => {
 const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 const random = (n) => crypto.getRandomValues(new Uint8Array(n));
 
-async function call(path, options) {
+async function call(path, options, base = HELPER) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 5000);
   const started = performance.now();
   try {
-    const res = await fetch(HELPER + path, { ...options, signal: ctrl.signal, cache: "no-store" });
+    const res = await fetch(base + path, { ...options, signal: ctrl.signal, cache: "no-store" });
     const text = await res.text();
     let json = null; try { json = JSON.parse(text); } catch {}
     return { status: res.status, ms: Math.round(performance.now() - started), text, json };
@@ -103,6 +108,20 @@ async function run() {
   overall.textContent = "deneniyor…"; overall.className = "overall wait";
   summary = [`Ortam: ${isSeb ? "SEB" : "Tarayıcı"} | Sayfa: ${location.origin} | ${new Date().toISOString()}`];
   let allOk = true;
+
+  if (foreign) {
+    // Sayfa izin verilmeyen bir adresten açıldı: yardımcı isteği REDDETMELİ.
+    summary.push(`Mod: RET BEKLENİYOR (izin verilen adres ${ALLOWED_ORIGIN}, bu sayfa ${location.origin})`);
+    const r = await call("/v1/info", { method: "GET" });
+    const refused = r.status !== 200;
+    allOk &= addCheck(refused, `R1. Başka adresten (${location.origin}) istek reddedildi`,
+      refused ? (r.status ? `durum ${r.status}` : `tarayıcı yanıtı okuyamadı: ${r.text}`) : "HATA: yardımcı yanıt verdi " + r.text);
+    const s2 = await call("/v1/sign", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ challenge: makeChallenge() }) });
+    allOk &= addCheck(s2.status !== 200, "R2. Başka adresten imza isteği reddedildi",
+      s2.status !== 200 ? (s2.status ? `durum ${s2.status}` : `tarayıcı yanıtı okuyamadı: ${s2.text}`) : "HATA: imza alındı " + s2.text);
+    addCheck(null, "Kanıt", "Reddin yardımcıdan geldiğini Event Log'daki 'Reddedildi: izin verilmeyen Origin' kaydı gösterir.");
+    return finish(allOk);
+  }
 
   // 1. /v1/info
   const info = await call("/v1/info", { method: "GET" });
@@ -151,6 +170,11 @@ async function run() {
   // 4. Biçimsiz challenge reddedilmeli
   const badSign = await call("/v1/sign", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ challenge: "rastgele veri imzalat" }) });
   allOk &= addCheck(badSign.status === 400, "4. Biçimsiz challenge reddedildi", `durum ${badSign.status}`);
+
+  // 5. Yanlış Host (localhost) reddedilmeli
+  const wrongHost = await call("/v1/info", { method: "GET" }, "http://localhost:47321");
+  allOk &= addCheck(wrongHost.status !== 200, "5. Yanlış Host (localhost:47321) reddedildi",
+    wrongHost.status !== 200 ? (wrongHost.status ? `durum ${wrongHost.status}` : `tarayıcı yanıtı okuyamadı: ${wrongHost.text}`) : "HATA: yanıt verdi");
 
   finish(allOk);
 }
